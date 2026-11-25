@@ -5,7 +5,22 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <meta name="color-scheme" content="light dark" />
 <link rel="icon" href="data:," />
-<title>SST Furniture</title>
+<title>SST Furniture | Sofas, Beds, Wardrobes &amp; Home Furniture</title>
+<meta name="description" content="SST Furniture — browse sofas, beds, dining sets, wardrobes and more home furniture. View products in 3D and AR to see how they look in your space." />
+<meta name="robots" content="index, follow" />
+<link rel="canonical" href="https://lucky-003.github.io/sst-furniture/" />
+<meta property="og:title" content="SST Furniture" />
+<meta property="og:description" content="SST Furniture — browse sofas, beds, dining sets, wardrobes and more home furniture. View products in 3D and AR to see how they look in your space." />
+<meta property="og:type" content="website" />
+<meta property="og:url" content="https://lucky-003.github.io/sst-furniture/" />
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FurnitureStore",
+  "name": "SST Furniture",
+  "url": "https://lucky-003.github.io/sst-furniture/"
+}
+</script>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <style>
   :root{
@@ -459,7 +474,7 @@
       <div class="visitors-box" id="adminVisitors">
         <div class="account-box-head">
           <h4>Visitors</h4>
-          <p>Every time someone opens the website, one visit is saved here. If the visitor allows location sharing, you also see their city and exact location.</p>
+          <p>Every time someone opens the website, one visit is saved here. If the visitor allows location sharing, you also see their exact location.</p>
         </div>
         <div class="visitor-stats">
           <div class="stat"><b id="visitTotal">—</b><span>Total website opens</span></div>
@@ -860,26 +875,10 @@ function insertVisit(d){
   } catch(e){}
 }
 function recordVisitNoLocation(){ insertVisit(null); }
-function recordVisitCity(city){ insertVisit({ city: city || null }); }
 function recordVisitLocation(lat, lng){
-  if (visitState.counted || visitState.started) return; // already counted earlier in this tab session
-  // Hold the insert until the reverse lookup settles (or its timeout fires),
-  // so the single row already includes the city alongside lat/lng.
-  var settled = false;
-  var finish = function(city){
-    if (settled) return; settled = true;
-    insertVisit({ lat: lat, lng: lng, city: city || null });
-  };
-  var timer = setTimeout(function(){ finish(null); }, 1800);
-  try {
-    fetch("https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=" + encodeURIComponent(lat) + "&longitude=" + encodeURIComponent(lng) + "&localityLanguage=en")
-      .then(function(r){ return r.ok ? r.json().catch(function(){ return null; }) : null; })
-      .then(function(j){
-        clearTimeout(timer);
-        finish(j ? (j.city || j.locality || null) : null);
-      })
-      .catch(function(){ clearTimeout(timer); finish(null); });
-  } catch(e){ clearTimeout(timer); finish(null); }
+  // Coordinates are saved only to the shop's own database (the visits table).
+  // They are never sent to any third-party geocoding service.
+  insertVisit({ lat: lat, lng: lng });
 }
 scheduleVisitFallback();
 
@@ -1099,10 +1098,10 @@ function renderVisitors(rows){
     var row = document.createElement("div"); row.className = "visit-row";
     var time = document.createElement("span"); time.className = "vtime"; time.textContent = fmtVisitTime(v.created_at);
     var main = document.createElement("span"); main.className = "vmain";
-    var city = document.createElement("span"); city.className = "vcity";
-    city.textContent = v.city ? String(v.city) : "Not shared";
-    main.appendChild(city);
     var hasCoords = typeof v.lat === "number" && typeof v.lng === "number" && isFinite(v.lat) && isFinite(v.lng);
+    var city = document.createElement("span"); city.className = "vcity";
+    city.textContent = v.city ? String(v.city) : (hasCoords ? "Location shared" : "Not shared");
+    main.appendChild(city);
     if (hasCoords){
       var coords = document.createElement("span"); coords.className = "vcoords";
       coords.textContent = v.lat.toFixed(5) + ", " + v.lng.toFixed(5);
