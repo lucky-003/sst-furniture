@@ -762,13 +762,29 @@ function closeSheets(){
 $("sheetClose").addEventListener("click", closeSheets);
 $("scrim").addEventListener("click", closeSheets);
 
-/* ---------------- visitor tracking (one row per page open) ---------------- */
-var visitState = { counted: false, started: false, inserted: false, id: null, hasLoc: false, pendingLoc: null };
+/* ---------------- visitor tracking (one row per page open) ----------------
+   Exactly ONE insert per session, and that insert already carries whatever
+   location is known at the decision point. There is deliberately no follow-up
+   PATCH: an anonymous PATCH with a row filter needs a SELECT privilege the
+   visitor role must never have (visitors must not read other visits), so the
+   database rejects it and the coordinates would never land. */
+var visitState = { counted: false, started: false, id: null };
+var visitFallbackTimer = null;
 try {
   visitState.counted = !!sessionStorage.getItem("sst_visit_counted");
   visitState.id = sessionStorage.getItem("sst_visit_id") || null;
-  if (visitState.counted && visitState.id) visitState.inserted = true;
+  if (visitState.counted) visitState.started = true;
 } catch(e){}
+function clearVisitFallback(){
+  if (visitFallbackTimer){ clearTimeout(visitFallbackTimer); visitFallbackTimer = null; }
+}
+function scheduleVisitFallback(){
+  if (visitState.counted || visitState.started) return;
+  clearVisitFallback();
+  // Safety net: the visitor never interacted with the location popup —
+  // still count the visit, with no location, after ~15 seconds.
+  visitFallbackTimer = setTimeout(function(){ visitFallbackTimer = null; insertVisit(null); }, 15000);
+}
 function newVisitId(){
   try {
     if (window.crypto && typeof crypto.randomUUID === "function") return crypto.randomUUID();
@@ -790,9 +806,9 @@ function insertVisit(d){
   if (visitState.counted || visitState.started) return;
   visitState.started = true;
   visitState.counted = true;
-  // The page generates the visit id itself, before inserting: anonymous visitors
-  // cannot read the saved row back (reads are admin-only), so the id must be
-  // known up front for the later location PATCH to find its row.
+  clearVisitFallback();
+  // The page generates the visit id itself: anonymous visitors cannot read
+  // the saved row back (reads are admin-only), so the id is created client-side.
   if (!visitState.id){
     visitState.id = newVisitId();
     try { sessionStorage.setItem("sst_visit_id", visitState.id); } catch(e){}
@@ -800,45 +816,22 @@ function insertVisit(d){
   try { sessionStorage.setItem("sst_visit_counted", "1"); } catch(e){}
   var payload = visitPayload(d);
   payload.id = visitState.id;
-  if (payload.lat !== null && payload.lng !== null) visitState.hasLoc = true;
   try {
     var headers = { "apikey": SB_KEY, "Authorization": "Bearer " + SB_KEY, "Content-Type": "application/json", "Prefer": "return=minimal" };
     fetch(SB_URL + "/rest/v1/visits", { method: "POST", headers: headers, body: JSON.stringify(payload), keepalive: true })
-      .then(function(){
-        visitState.inserted = true;
-        if (visitState.pendingLoc && !visitState.hasLoc && visitState.id){
-          var pl = visitState.pendingLoc; visitState.pendingLoc = null;
-          patchVisitLocation(pl);
-        }
-      })
       .catch(function(){ /* tracking must never affect the shop */ });
   } catch(e){}
 }
-function patchVisitLocation(d){
-  if (!visitState.id || visitState.hasLoc) return;
-  visitState.hasLoc = true;
-  try {
-    var headers = { "apikey": SB_KEY, "Authorization": "Bearer " + SB_KEY, "Content-Type": "application/json", "Prefer": "return=minimal" };
-    fetch(SB_URL + "/rest/v1/visits?id=eq." + encodeURIComponent(visitState.id), {
-      method: "PATCH", headers: headers, body: JSON.stringify(visitPayload(d)), keepalive: true
-    }).catch(function(){});
-  } catch(e){}
-}
 function recordVisitNoLocation(){ insertVisit(null); }
+function recordVisitCity(city){ insertVisit({ city: city || null }); }
 function recordVisitLocation(lat, lng){
-  if (visitState.counted && !visitState.started) return; // already counted earlier in this tab session
+  if (visitState.counted || visitState.started) return; // already counted earlier in this tab session
+  // Hold the insert until the reverse lookup settles (or its timeout fires),
+  // so the single row already includes the city alongside lat/lng.
   var settled = false;
   var finish = function(city){
     if (settled) return; settled = true;
-    var d = { lat: lat, lng: lng, city: city || null };
-    if (!visitState.started) insertVisit(d);
-    else if (!visitState.hasLoc){
-      // Patch only once the insert has landed — the id is already known, but a
-      // PATCH sent before the row exists would match nothing. Until then, hold
-      // the location as pending; insertVisit patches it as soon as it completes.
-      if (visitState.inserted && visitState.id) patchVisitLocation(d);
-      else visitState.pendingLoc = d;
-    }
+    insertVisit({ lat: lat, lng: lng, city: city || null });
   };
   var timer = setTimeout(function(){ finish(null); }, 1800);
   try {
@@ -851,10 +844,7 @@ function recordVisitLocation(lat, lng){
       .catch(function(){ clearTimeout(timer); finish(null); });
   } catch(e){ clearTimeout(timer); finish(null); }
 }
-if (!visitState.counted){
-  // No location outcome within ~5 seconds — still count the visit, with no location.
-  setTimeout(function(){ insertVisit(null); }, 5000);
-}
+scheduleVisitFallback();
 
 /* ---------------- location gate ---------------- */
 var gateDone = false;
@@ -870,6 +860,10 @@ $("gateSkip").addEventListener("click", function(){
 });
 $("gateAllow").addEventListener("click", function(){
   var st = $("gateStatus");
+  // The visitor made a decision — the no-interaction fallback must not fire
+  // while we wait for the geolocation outcome. Nothing is inserted yet: the
+  // single visit row is written only once that outcome is known.
+  clearVisitFallback();
   if (!("geolocation" in navigator)){
     st.textContent = "Location isn't supported on this device — showing all furniture.";
     st.className = "gate-status err";
@@ -878,7 +872,18 @@ $("gateAllow").addEventListener("click", function(){
   }
   st.className = "gate-status";
   st.textContent = "Getting your location…";
+  var geoSettled = false;
+  // Watchdog: if the browser never calls back at all, still record the visit
+  // (with no location) instead of losing it.
+  var geoWatchdog = setTimeout(function(){
+    if (geoSettled) return; geoSettled = true;
+    recordVisitNoLocation();
+    st.className = "gate-status err";
+    st.textContent = "Couldn't get your location — tap “Not now” to continue.";
+  }, 13500);
   navigator.geolocation.getCurrentPosition(function(pos){
+    if (geoSettled) return; geoSettled = true;
+    clearTimeout(geoWatchdog);
     var lat = pos.coords.latitude, lng = pos.coords.longitude;
     var label = lat.toFixed(3) + ", " + lng.toFixed(3);
     setLocChip("Near " + label);
@@ -886,6 +891,8 @@ $("gateAllow").addEventListener("click", function(){
     recordVisitLocation(lat, lng);
     setTimeout(closeGate, 700);
   }, function(err){
+    if (geoSettled) return; geoSettled = true;
+    clearTimeout(geoWatchdog);
     recordVisitNoLocation();
     st.className = "gate-status err";
     st.textContent = err && err.code === 1
