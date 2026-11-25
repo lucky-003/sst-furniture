@@ -326,6 +326,24 @@
   <div class="sheet-wrap">
     <button class="close-x" id="addClose" aria-label="Close admin panel" style="background:var(--surface2);color:var(--ink)">✕</button>
 
+    <div id="adminSetPassword" hidden>
+      <div class="admin-head">
+        <div>
+          <h3>Set your admin password</h3>
+          <p>You opened the invitation link from your email. Set a password below to finish creating your admin login — after that you can log in any time with your email and this password.</p>
+        </div>
+      </div>
+      <form class="form" id="setPasswordForm">
+        <label for="newPassword">New password</label>
+        <input id="newPassword" type="password" required autocomplete="new-password" placeholder="Enter a new password" />
+        <label for="confirmPassword">Confirm password</label>
+        <input id="confirmPassword" type="password" required autocomplete="new-password" placeholder="Enter the password again" />
+        <div class="gate-status err" id="setPasswordError" aria-live="polite"></div>
+        <div class="gate-status" id="setPasswordStatus" aria-live="polite"></div>
+        <button class="btn-primary" type="submit" id="setPasswordSubmit">Set Password</button>
+      </form>
+    </div>
+
     <div id="adminLogin" hidden>
       <div class="admin-head">
         <div>
@@ -355,6 +373,7 @@
         <div class="stat"><b id="statCats">0</b><span>Categories</span></div>
         <div class="stat"><b id="statWood">0</b><span>Wood / Ply pieces</span></div>
       </div>
+      <div class="admin-note" id="passwordSetBanner" hidden><b>Password set — you are logged in.</b> You can now manage products below, and next time log in from the Admin Panel with your email and the password you just set.</div>
       <div class="admin-user" id="adminUserLine"></div>
       <div class="admin-toolbar">
         <button class="btn-primary" id="adminAddBtn" type="button">+ Add New Product</button>
@@ -716,6 +735,7 @@ $("gateAllow").addEventListener("click", function(){
 
 /* ---------------- admin panel (Supabase-backed) ---------------- */
 var photoData = "", photoFile = null, editingId = null, deleteArmedId = null;
+var pendingAuthToken = "";
 function renderAdmin(){
   $("statTotal").textContent = String(PRODUCTS.length);
   var cats = {}; PRODUCTS.forEach(function(p){ cats[p.cat] = 1; });
@@ -761,6 +781,7 @@ function renderAdmin(){
 }
 function showAdminHome(){
   $("adminLogin").hidden = true;
+  var sp = $("adminSetPassword"); if (sp) sp.hidden = true;
   $("addForm").hidden = true; $("adminHome").hidden = false; editingId = null;
   var em = ""; try { em = sessionStorage.getItem("sst_sb_email") || ""; } catch(e){}
   $("adminUserLine").textContent = em
@@ -770,7 +791,14 @@ function showAdminHome(){
 }
 function showAdminLogin(){
   $("adminHome").hidden = true; $("addForm").hidden = true; $("adminLogin").hidden = false;
+  var sp = $("adminSetPassword"); if (sp) sp.hidden = true;
   $("loginError").textContent = "";
+}
+function showSetPasswordForm(){
+  $("adminLogin").hidden = true; $("adminHome").hidden = true; $("addForm").hidden = true;
+  var sp = $("adminSetPassword"); if (sp) sp.hidden = false;
+  var err = $("setPasswordError"); if (err) err.textContent = "";
+  var st = $("setPasswordStatus"); if (st) st.textContent = "";
 }
 function openAdmin(){
   if (sbToken()) showAdminHome(); else showAdminLogin();
@@ -802,7 +830,9 @@ $("addClose").addEventListener("click", closeSheets);
 $("adminDoneBtn").addEventListener("click", closeSheets);
 $("adminAddBtn").addEventListener("click", function(){ openProductForm(null); });
 $("adminLogoutBtn").addEventListener("click", function(){
-  try { sessionStorage.removeItem("sst_sb_token"); sessionStorage.removeItem("sst_sb_email"); } catch(e){}
+  try { sessionStorage.removeItem("sst_sb_token"); sessionStorage.removeItem("sst_sb_email"); sessionStorage.removeItem("sst_sb_refresh_token"); } catch(e){}
+  var b = $("passwordSetBanner"); if (b) b.hidden = true;
+  pendingAuthToken = "";
   toast("Logged out.");
   showAdminLogin();
 });
@@ -837,6 +867,131 @@ $("loginForm").addEventListener("submit", function(ev){
     $("loginError").textContent = "Network problem — please try again.";
   });
 });
+
+/* ---------------- invite / recovery / signup hash handling ---------------- */
+function parseHashParams(){
+  var raw = (window.location.hash || "").replace(/^#\/?/, "");
+  if (!raw) return {};
+  var out = {};
+  raw.split("&").forEach(function(pair){
+    if (!pair) return;
+    var idx = pair.indexOf("=");
+    var k = idx > -1 ? pair.slice(0, idx) : pair;
+    var v = idx > -1 ? pair.slice(idx + 1) : "";
+    try { k = decodeURIComponent(k); } catch(e){}
+    try { v = decodeURIComponent(v.replace(/\+/g, " ")); } catch(e){ v = v.replace(/\+/g, " "); }
+    if (k) out[k] = v;
+  });
+  return out;
+}
+function clearAuthHash(){
+  try { history.replaceState(null, document.title, window.location.pathname + window.location.search); }
+  catch(e){ window.location.hash = ""; }
+}
+function storeAuthSession(accessToken, refreshToken){
+  try {
+    if (accessToken) sessionStorage.setItem("sst_sb_token", accessToken);
+    if (refreshToken) sessionStorage.setItem("sst_sb_refresh_token", refreshToken);
+  } catch(e){}
+}
+function fetchAuthEmail(accessToken){
+  return fetch(SB_URL + "/auth/v1/user", {
+    headers: { "apikey": SB_KEY, "Authorization": "Bearer " + accessToken }
+  }).then(function(r){ return r.ok ? r.json().catch(function(){ return null; }) : null; })
+    .then(function(u){
+      if (u && u.email){ try { sessionStorage.setItem("sst_sb_email", u.email); } catch(e){} }
+      return u;
+    }).catch(function(){ return null; });
+}
+function handleAuthHash(){
+  var params = parseHashParams();
+  var hasError = !!(params.error_description || params.error);
+  var hasToken = !!params.access_token;
+  if (!hasError && !hasToken) return false;
+  // The location gate would cover the admin sheet — dismiss it for auth flows.
+  closeGate();
+  if (hasError){
+    var msg = params.error_description || params.error || "That email link could not be used. Please request a new invitation.";
+    openAdmin();
+    // openAdmin may have shown home if a stale token exists; force the login view for errors.
+    showAdminLogin();
+    $("loginError").textContent = msg;
+    clearAuthHash();
+    return true;
+  }
+  var accessToken = params.access_token;
+  var refreshToken = params.refresh_token || "";
+  var type = (params.type || "").toLowerCase();
+  storeAuthSession(accessToken, refreshToken);
+  pendingAuthToken = accessToken;
+  if (type === "invite" || type === "recovery"){
+    // Open the panel on the set-password form; the hash is cleared only after the password is set.
+    $("scrim").classList.add("open"); $("addSheet").classList.add("open");
+    showSetPasswordForm();
+    fetchAuthEmail(accessToken).then(function(){
+      var em = ""; try { em = sessionStorage.getItem("sst_sb_email") || ""; } catch(e){}
+      var st = $("setPasswordStatus");
+      if (st && em) st.textContent = "Invitation for " + em + " — set your password to continue.";
+    });
+    return true;
+  }
+  // signup confirmation or a plain session token: treat as a completed login.
+  clearAuthHash();
+  fetchAuthEmail(accessToken).then(function(){
+    showAdminHome();
+    loadDbProducts();
+  });
+  $("scrim").classList.add("open"); $("addSheet").classList.add("open");
+  showAdminHome();
+  toast("Logged in — admin changes now save permanently.");
+  loadDbProducts();
+  return true;
+}
+var setPwForm = $("setPasswordForm");
+if (setPwForm){
+  setPwForm.addEventListener("submit", function(ev){
+    ev.preventDefault();
+    var np = $("newPassword").value || "";
+    var cp = $("confirmPassword").value || "";
+    var errEl = $("setPasswordError");
+    var stEl = $("setPasswordStatus");
+    errEl.textContent = ""; stEl.textContent = "";
+    if (!np){ errEl.textContent = "Please enter a new password."; return; }
+    if (np.length < 6){ errEl.textContent = "Password must be at least 6 characters."; return; }
+    if (np !== cp){ errEl.textContent = "Passwords do not match — please enter the same password twice."; return; }
+    var token = pendingAuthToken || sbToken();
+    if (!token){ errEl.textContent = "This invitation link has expired. Please request a new invitation and open the fresh link."; return; }
+    var btn = $("setPasswordSubmit"); btn.disabled = true; btn.textContent = "Setting password…";
+    fetch(SB_URL + "/auth/v1/user", {
+      method: "PUT",
+      headers: { "apikey": SB_KEY, "Authorization": "Bearer " + token, "Content-Type": "application/json" },
+      body: JSON.stringify({ password: np })
+    }).then(function(r){
+      return r.json().catch(function(){ return null; }).then(function(j){ return { ok: r.ok, status: r.status, j: j }; });
+    }).then(function(res){
+      btn.disabled = false; btn.textContent = "Set Password";
+      if (!res.ok){
+        errEl.textContent = (res.j && (res.j.error_description || res.j.msg || res.j.message)) || "Could not set the password — the link may have expired. Please request a new invitation.";
+        return;
+      }
+      if (res.j && res.j.email){ try { sessionStorage.setItem("sst_sb_email", res.j.email); } catch(e){} }
+      // Keep the freshly stored session (same storage as the normal login flow).
+      storeAuthSession(token, "");
+      pendingAuthToken = "";
+      clearAuthHash();
+      $("newPassword").value = ""; $("confirmPassword").value = "";
+      var banner = $("passwordSetBanner"); if (banner) banner.hidden = false;
+      showAdminHome();
+      if (banner) banner.hidden = false;
+      var ul = $("adminUserLine");
+      toast("Password set — you are logged in");
+      loadDbProducts();
+    }).catch(function(){
+      btn.disabled = false; btn.textContent = "Set Password";
+      errEl.textContent = "Network problem — please check your connection and try again.";
+    });
+  });
+}
 $("formCancel").addEventListener("click", function(){ showAdminHome(); });
 $("photoPick").addEventListener("click", function(){ $("photoInput").click(); });
 $("photoInput").addEventListener("change", function(){
@@ -1260,6 +1415,7 @@ window.addEventListener("error", function(e){
 
 renderGrid();
 loadDbProducts();
+handleAuthHash();
 })();
 </script>
 </body>
