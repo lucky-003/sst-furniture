@@ -260,6 +260,18 @@
   .account-current b{color:var(--ink)}
   .gate-status.ok{color:#2e7d32}
   @media (prefers-color-scheme: dark){ .gate-status.ok{color:#8bc98e} }
+  .visitors-box{margin:16px 18px 0; border:1px solid var(--line); border-radius:14px; background:var(--surface); overflow:hidden}
+  .visitor-stats{display:grid; grid-template-columns:1fr 1fr; gap:10px; padding:14px 16px 0}
+  .visitor-tools{padding:12px 16px 0}
+  .visitor-tools .btn-secondary{width:100%}
+  .visitor-list{padding:12px 16px 16px; display:flex; flex-direction:column; gap:8px}
+  .visitor-empty{color:var(--muted); font-size:13.5px; text-align:center; padding:10px 4px}
+  .visit-row{display:flex; gap:10px; align-items:center; background:var(--surface2); border:1px solid var(--line); border-radius:10px; padding:9px 12px; font-size:13px}
+  .visit-row .vtime{font-weight:700; white-space:nowrap; line-height:1.35}
+  .visit-row .vmain{flex:1; min-width:0; line-height:1.4}
+  .visit-row .vcity{font-weight:600}
+  .visit-row .vcoords{color:var(--muted); font-size:12px; display:block}
+  a.maps-link{text-decoration:none; display:inline-flex; align-items:center; white-space:nowrap}
   [hidden]{display:none !important}
 </style>
 </head>
@@ -415,6 +427,21 @@
           <div class="gate-status ok" id="changePasswordStatus" aria-live="polite"></div>
           <button class="btn-primary" type="submit" id="changePasswordSubmit">Change Password</button>
         </form>
+      </div>
+      <div class="visitors-box" id="adminVisitors">
+        <div class="account-box-head">
+          <h4>Visitors</h4>
+          <p>Every time someone opens the website, one visit is saved here. If the visitor allows location sharing, you also see their city and exact location.</p>
+        </div>
+        <div class="visitor-stats">
+          <div class="stat"><b id="visitTotal">—</b><span>Total website opens</span></div>
+          <div class="stat"><b id="visitToday">—</b><span>Opens today</span></div>
+        </div>
+        <div class="visitor-tools">
+          <button class="btn-secondary" id="visitorsRefresh" type="button">Refresh visitor list</button>
+          <div class="gate-status" id="visitorsStatus" aria-live="polite"></div>
+        </div>
+        <div class="visitor-list" id="visitorList"></div>
       </div>
       <div class="admin-note">
         <b>Your own stock photos:</b> in the add / edit form, tap “Product photo” and pick the real photo from your phone — it uploads and becomes that product's shop photo for every visitor.<br>
@@ -735,6 +762,100 @@ function closeSheets(){
 $("sheetClose").addEventListener("click", closeSheets);
 $("scrim").addEventListener("click", closeSheets);
 
+/* ---------------- visitor tracking (one row per page open) ---------------- */
+var visitState = { counted: false, started: false, inserted: false, id: null, hasLoc: false, pendingLoc: null };
+try {
+  visitState.counted = !!sessionStorage.getItem("sst_visit_counted");
+  visitState.id = sessionStorage.getItem("sst_visit_id") || null;
+  if (visitState.counted && visitState.id) visitState.inserted = true;
+} catch(e){}
+function newVisitId(){
+  try {
+    if (window.crypto && typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  } catch(e){}
+  // Fallback for older browsers without crypto.randomUUID()
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, function(c){
+    var r = Math.random() * 16 | 0, v = c === "x" ? r : (r & 0x3 | 0x8);
+    return v.toString(16);
+  });
+}
+function visitPayload(d){
+  return {
+    city: (d && d.city) ? String(d.city) : null,
+    lat: (d && typeof d.lat === "number" && isFinite(d.lat)) ? d.lat : null,
+    lng: (d && typeof d.lng === "number" && isFinite(d.lng)) ? d.lng : null
+  };
+}
+function insertVisit(d){
+  if (visitState.counted || visitState.started) return;
+  visitState.started = true;
+  visitState.counted = true;
+  // The page generates the visit id itself, before inserting: anonymous visitors
+  // cannot read the saved row back (reads are admin-only), so the id must be
+  // known up front for the later location PATCH to find its row.
+  if (!visitState.id){
+    visitState.id = newVisitId();
+    try { sessionStorage.setItem("sst_visit_id", visitState.id); } catch(e){}
+  }
+  try { sessionStorage.setItem("sst_visit_counted", "1"); } catch(e){}
+  var payload = visitPayload(d);
+  payload.id = visitState.id;
+  if (payload.lat !== null && payload.lng !== null) visitState.hasLoc = true;
+  try {
+    var headers = { "apikey": SB_KEY, "Authorization": "Bearer " + SB_KEY, "Content-Type": "application/json", "Prefer": "return=minimal" };
+    fetch(SB_URL + "/rest/v1/visits", { method: "POST", headers: headers, body: JSON.stringify(payload), keepalive: true })
+      .then(function(){
+        visitState.inserted = true;
+        if (visitState.pendingLoc && !visitState.hasLoc && visitState.id){
+          var pl = visitState.pendingLoc; visitState.pendingLoc = null;
+          patchVisitLocation(pl);
+        }
+      })
+      .catch(function(){ /* tracking must never affect the shop */ });
+  } catch(e){}
+}
+function patchVisitLocation(d){
+  if (!visitState.id || visitState.hasLoc) return;
+  visitState.hasLoc = true;
+  try {
+    var headers = { "apikey": SB_KEY, "Authorization": "Bearer " + SB_KEY, "Content-Type": "application/json", "Prefer": "return=minimal" };
+    fetch(SB_URL + "/rest/v1/visits?id=eq." + encodeURIComponent(visitState.id), {
+      method: "PATCH", headers: headers, body: JSON.stringify(visitPayload(d)), keepalive: true
+    }).catch(function(){});
+  } catch(e){}
+}
+function recordVisitNoLocation(){ insertVisit(null); }
+function recordVisitLocation(lat, lng){
+  if (visitState.counted && !visitState.started) return; // already counted earlier in this tab session
+  var settled = false;
+  var finish = function(city){
+    if (settled) return; settled = true;
+    var d = { lat: lat, lng: lng, city: city || null };
+    if (!visitState.started) insertVisit(d);
+    else if (!visitState.hasLoc){
+      // Patch only once the insert has landed — the id is already known, but a
+      // PATCH sent before the row exists would match nothing. Until then, hold
+      // the location as pending; insertVisit patches it as soon as it completes.
+      if (visitState.inserted && visitState.id) patchVisitLocation(d);
+      else visitState.pendingLoc = d;
+    }
+  };
+  var timer = setTimeout(function(){ finish(null); }, 1800);
+  try {
+    fetch("https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=" + encodeURIComponent(lat) + "&longitude=" + encodeURIComponent(lng) + "&localityLanguage=en")
+      .then(function(r){ return r.ok ? r.json().catch(function(){ return null; }) : null; })
+      .then(function(j){
+        clearTimeout(timer);
+        finish(j ? (j.city || j.locality || null) : null);
+      })
+      .catch(function(){ clearTimeout(timer); finish(null); });
+  } catch(e){ clearTimeout(timer); finish(null); }
+}
+if (!visitState.counted){
+  // No location outcome within ~5 seconds — still count the visit, with no location.
+  setTimeout(function(){ insertVisit(null); }, 5000);
+}
+
 /* ---------------- location gate ---------------- */
 var gateDone = false;
 function closeGate(){
@@ -743,6 +864,7 @@ function closeGate(){
 }
 function setLocChip(text){ $("locText").textContent = text; }
 $("gateSkip").addEventListener("click", function(){
+  recordVisitNoLocation();
   setLocChip("Location not set");
   closeGate();
 });
@@ -751,6 +873,7 @@ $("gateAllow").addEventListener("click", function(){
   if (!("geolocation" in navigator)){
     st.textContent = "Location isn't supported on this device — showing all furniture.";
     st.className = "gate-status err";
+    recordVisitNoLocation();
     setTimeout(closeGate, 900); return;
   }
   st.className = "gate-status";
@@ -760,8 +883,10 @@ $("gateAllow").addEventListener("click", function(){
     var label = lat.toFixed(3) + ", " + lng.toFixed(3);
     setLocChip("Near " + label);
     st.textContent = "Location found — welcome in!";
+    recordVisitLocation(lat, lng);
     setTimeout(closeGate, 700);
   }, function(err){
+    recordVisitNoLocation();
     st.className = "gate-status err";
     st.textContent = err && err.code === 1
       ? "Location permission denied — no problem, tap “Not now” to continue."
@@ -825,6 +950,7 @@ function showAdminHome(){
     : "Signed in — changes save permanently for every visitor.";
   var cur = $("currentLoginEmail"); if (cur) cur.textContent = em || "—";
   renderAdmin();
+  loadVisitors();
 }
 function showAdminLogin(){
   $("adminHome").hidden = true; $("addForm").hidden = true; $("adminLogin").hidden = false;
@@ -904,6 +1030,83 @@ $("loginForm").addEventListener("submit", function(ev){
     $("loginError").textContent = "Network problem — please try again.";
   });
 });
+
+/* ---------------- admin: visitors ---------------- */
+function parseCountRange(headers){
+  var cr = "";
+  try { cr = headers.get("content-range") || ""; } catch(e){}
+  var m = /\/(\d+)\s*$/.exec(cr);
+  return m ? parseInt(m[1], 10) : null;
+}
+function fmtVisitTime(iso){
+  var d = new Date(iso);
+  if (isNaN(d.getTime())) return String(iso || "");
+  return d.toLocaleDateString() + ", " + d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+function renderVisitors(rows){
+  var list = $("visitorList"); if (!list) return;
+  list.innerHTML = "";
+  if (!rows.length){
+    var e = document.createElement("div"); e.className = "visitor-empty";
+    e.textContent = "No visits recorded yet. New visits will appear here as people open the website.";
+    list.appendChild(e); return;
+  }
+  rows.forEach(function(v){
+    var row = document.createElement("div"); row.className = "visit-row";
+    var time = document.createElement("span"); time.className = "vtime"; time.textContent = fmtVisitTime(v.created_at);
+    var main = document.createElement("span"); main.className = "vmain";
+    var city = document.createElement("span"); city.className = "vcity";
+    city.textContent = v.city ? String(v.city) : "Not shared";
+    main.appendChild(city);
+    var hasCoords = typeof v.lat === "number" && typeof v.lng === "number" && isFinite(v.lat) && isFinite(v.lng);
+    if (hasCoords){
+      var coords = document.createElement("span"); coords.className = "vcoords";
+      coords.textContent = v.lat.toFixed(5) + ", " + v.lng.toFixed(5);
+      main.appendChild(coords);
+    }
+    row.appendChild(time); row.appendChild(main);
+    if (hasCoords){
+      var link = document.createElement("a");
+      link.className = "btn-small maps-link";
+      link.href = "https://www.google.com/maps?q=" + v.lat + "," + v.lng;
+      link.target = "_blank"; link.rel = "noopener";
+      link.textContent = "Open in Maps";
+      row.appendChild(link);
+    }
+    list.appendChild(row);
+  });
+}
+function loadVisitors(){
+  if (!sbToken()) return;
+  var list = $("visitorList"); if (!list) return;
+  var st = $("visitorsStatus"); if (st) st.textContent = "Loading visits…";
+  var headers = sbHeaders(false); headers["Prefer"] = "count=exact";
+  fetch(SB_URL + "/rest/v1/visits?select=*&order=created_at.desc&limit=100", { headers: headers })
+    .then(function(r){
+      if (!r.ok) throw new Error("visits " + r.status);
+      var total = parseCountRange(r.headers);
+      return r.json().then(function(rows){ return { rows: Array.isArray(rows) ? rows : [], total: total }; });
+    })
+    .then(function(res){
+      $("visitTotal").textContent = String(res.total !== null ? res.total : res.rows.length);
+      renderVisitors(res.rows);
+      if (st) st.textContent = "";
+      var start = new Date(); start.setHours(0, 0, 0, 0);
+      var todayFallback = res.rows.filter(function(v){ return new Date(v.created_at) >= start; }).length;
+      var h2 = sbHeaders(false); h2["Prefer"] = "count=exact";
+      return fetch(SB_URL + "/rest/v1/visits?select=id&created_at=gte." + encodeURIComponent(start.toISOString()) + "&limit=1", { headers: h2 })
+        .then(function(r){
+          var c = r.ok ? parseCountRange(r.headers) : null;
+          $("visitToday").textContent = String(c !== null ? c : todayFallback);
+        })
+        .catch(function(){ $("visitToday").textContent = String(todayFallback); });
+    })
+    .catch(function(){
+      if (st) st.textContent = "Couldn't load visits — tap Refresh to try again.";
+    });
+}
+var visitorsRefreshBtn = $("visitorsRefresh");
+if (visitorsRefreshBtn) visitorsRefreshBtn.addEventListener("click", loadVisitors);
 
 /* ---------------- account settings: change email & password ---------------- */
 function sbUpdateUser(payload){
