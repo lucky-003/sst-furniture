@@ -249,6 +249,17 @@
   .admin-user{padding:12px 18px 0; font-size:12.5px; color:var(--muted)}
   .admin-note{margin:14px 18px 0; background:var(--surface2); border:1px solid var(--line); border-radius:12px; padding:12px 14px; font-size:13px; line-height:1.6; color:var(--ink)}
   .admin-note b{color:var(--accent)}
+  .account-box{margin:16px 18px 0; border:1px solid var(--line); border-radius:14px; background:var(--surface); overflow:hidden}
+  .account-box-head{padding:14px 16px 2px}
+  .account-box-head h4{font-family:Georgia,serif; font-size:17px; margin:0}
+  .account-box-head p{margin:5px 0 0; color:var(--muted); font-size:13px; line-height:1.5}
+  .account-box .form{padding:4px 16px 16px}
+  .account-box .form + .form{border-top:1px solid var(--line)}
+  .account-box .form h5{font-size:14.5px; margin:12px 0 2px; font-weight:700}
+  .account-current{font-size:13px; color:var(--muted); margin-top:6px}
+  .account-current b{color:var(--ink)}
+  .gate-status.ok{color:#2e7d32}
+  @media (prefers-color-scheme: dark){ .gate-status.ok{color:#8bc98e} }
   [hidden]{display:none !important}
 </style>
 </head>
@@ -379,6 +390,31 @@
         <button class="btn-primary" id="adminAddBtn" type="button">+ Add New Product</button>
         <button class="btn-secondary" id="adminDoneBtn" type="button">Done</button>
         <button class="btn-secondary" id="adminLogoutBtn" type="button">Logout</button>
+      </div>
+      <div class="account-box" id="adminAccountSettings">
+        <div class="account-box-head">
+          <h4>Account settings</h4>
+          <p>Change your login ID (email) or password. These changes apply to your admin login only.</p>
+          <div class="account-current">Current login ID: <b id="currentLoginEmail">—</b></div>
+        </div>
+        <form class="form" id="changeEmailForm">
+          <h5>Change login email (ID)</h5>
+          <label for="newLoginEmail">New email (new login ID)</label>
+          <input id="newLoginEmail" type="email" required autocomplete="email" placeholder="Enter new email" />
+          <div class="gate-status err" id="changeEmailError" aria-live="polite"></div>
+          <div class="gate-status ok" id="changeEmailStatus" aria-live="polite"></div>
+          <button class="btn-primary" type="submit" id="changeEmailSubmit">Change Email</button>
+        </form>
+        <form class="form" id="changePasswordForm">
+          <h5>Change password</h5>
+          <label for="acctNewPassword">New password</label>
+          <input id="acctNewPassword" type="password" required autocomplete="new-password" placeholder="Enter new password" />
+          <label for="acctConfirmPassword">Confirm new password</label>
+          <input id="acctConfirmPassword" type="password" required autocomplete="new-password" placeholder="Enter new password again" />
+          <div class="gate-status err" id="changePasswordError" aria-live="polite"></div>
+          <div class="gate-status ok" id="changePasswordStatus" aria-live="polite"></div>
+          <button class="btn-primary" type="submit" id="changePasswordSubmit">Change Password</button>
+        </form>
       </div>
       <div class="admin-note">
         <b>Your own stock photos:</b> in the add / edit form, tap “Product photo” and pick the real photo from your phone — it uploads and becomes that product's shop photo for every visitor.<br>
@@ -787,6 +823,7 @@ function showAdminHome(){
   $("adminUserLine").textContent = em
     ? ("Signed in as " + em + " — changes save permanently for every visitor.")
     : "Signed in — changes save permanently for every visitor.";
+  var cur = $("currentLoginEmail"); if (cur) cur.textContent = em || "—";
   renderAdmin();
 }
 function showAdminLogin(){
@@ -867,6 +904,73 @@ $("loginForm").addEventListener("submit", function(ev){
     $("loginError").textContent = "Network problem — please try again.";
   });
 });
+
+/* ---------------- account settings: change email & password ---------------- */
+function sbUpdateUser(payload){
+  var token = sbToken();
+  if (!token) return Promise.reject(new Error("no_token"));
+  return fetch(SB_URL + "/auth/v1/user", {
+    method: "PUT",
+    headers: { "apikey": SB_KEY, "Authorization": "Bearer " + token, "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  }).then(function(r){
+    return r.json().catch(function(){ return null; }).then(function(j){ return { ok: r.ok, status: r.status, j: j }; });
+  });
+}
+function sbErrorText(res, fallback){
+  return (res && res.j && (res.j.error_description || res.j.msg || res.j.message || res.j.error)) || fallback;
+}
+var changePwForm = $("changePasswordForm");
+if (changePwForm){
+  changePwForm.addEventListener("submit", function(ev){
+    ev.preventDefault();
+    var np = $("acctNewPassword").value || "";
+    var cp = $("acctConfirmPassword").value || "";
+    var errEl = $("changePasswordError");
+    var stEl = $("changePasswordStatus");
+    errEl.textContent = ""; stEl.textContent = "";
+    if (!sbToken()){ errEl.textContent = "Your login session has expired — please log in again."; showAdminLogin(); return; }
+    if (!np){ errEl.textContent = "Please enter a new password."; return; }
+    if (np.length < 6){ errEl.textContent = "Password must be at least 6 characters."; return; }
+    if (np !== cp){ errEl.textContent = "Passwords do not match — please enter the same password twice."; return; }
+    var btn = $("changePasswordSubmit"); btn.disabled = true; btn.textContent = "Changing password…";
+    sbUpdateUser({ password: np }).then(function(res){
+      btn.disabled = false; btn.textContent = "Change Password";
+      if (!res.ok){ errEl.textContent = sbErrorText(res, "Could not change the password — please try again."); return; }
+      $("acctNewPassword").value = ""; $("acctConfirmPassword").value = "";
+      stEl.textContent = "Password changed successfully. Use the new password next time you log in.";
+      toast("Password changed successfully.");
+    }).catch(function(err){
+      btn.disabled = false; btn.textContent = "Change Password";
+      errEl.textContent = (err && err.message === "no_token") ? "Your login session has expired — please log in again." : "Network problem — please check your connection and try again.";
+    });
+  });
+}
+var changeEmForm = $("changeEmailForm");
+if (changeEmForm){
+  changeEmForm.addEventListener("submit", function(ev){
+    ev.preventDefault();
+    var ne = $("newLoginEmail").value.trim();
+    var errEl = $("changeEmailError");
+    var stEl = $("changeEmailStatus");
+    errEl.textContent = ""; stEl.textContent = "";
+    if (!sbToken()){ errEl.textContent = "Your login session has expired — please log in again."; showAdminLogin(); return; }
+    if (!ne || ne.indexOf("@") < 1){ errEl.textContent = "Please enter a valid new email address."; return; }
+    var curEm = ""; try { curEm = sessionStorage.getItem("sst_sb_email") || ""; } catch(e){}
+    if (curEm && ne.toLowerCase() === curEm.toLowerCase()){ errEl.textContent = "That is already your current login email."; return; }
+    var btn = $("changeEmailSubmit"); btn.disabled = true; btn.textContent = "Sending confirmation…";
+    sbUpdateUser({ email: ne }).then(function(res){
+      btn.disabled = false; btn.textContent = "Change Email";
+      if (!res.ok){ errEl.textContent = sbErrorText(res, "Could not change the email — please try again."); return; }
+      $("newLoginEmail").value = "";
+      stEl.textContent = "Confirmation link sent to " + ne + ". Open that email and click the link — your login ID will change to the new email only after you confirm it. Until then, keep logging in with your current ID.";
+      toast("Confirmation link sent to the new email.");
+    }).catch(function(err){
+      btn.disabled = false; btn.textContent = "Change Email";
+      errEl.textContent = (err && err.message === "no_token") ? "Your login session has expired — please log in again." : "Network problem — please check your connection and try again.";
+    });
+  });
+}
 
 /* ---------------- invite / recovery / signup hash handling ---------------- */
 function parseHashParams(){
