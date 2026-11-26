@@ -213,6 +213,19 @@
     background:rgba(255,255,255,.08); color:#fff; font-size:19px; padding:6px 12px;
   }
   .v-bar .lbl{color:#cfc4b6; font-size:12px; margin-right:2px}
+  .v-bar.ar-bar{flex-wrap:wrap; row-gap:6px}
+  .ar-place{
+    background:var(--accent); color:var(--accent-ink); border-color:transparent !important;
+    font-size:15px !important; font-weight:700; padding:6px 18px !important;
+  }
+  .ar-scale{display:inline-flex; align-items:center; gap:2px}
+  .ar-scale input[type="range"]{width:104px; accent-color:#d99a5b; min-height:48px; cursor:pointer}
+  /* While a WebXR session runs, the viewer becomes the DOM overlay root:
+     its backgrounds go transparent so the real camera view shows through. */
+  .viewer.xr-active{background:transparent}
+  .viewer.xr-active .v-head{background:rgba(20,16,13,.45)}
+  .viewer.xr-active .v-bar{background:rgba(20,16,13,.55)}
+  .viewer.xr-active .v-fallback,.viewer.xr-active video{display:none}
 
   /* admin panel + product form */
   .admin-sheet{max-height:94dvh}
@@ -441,6 +454,7 @@
       </div>
       <div class="admin-note" id="passwordSetBanner" hidden><b>Password set — you are logged in.</b> You can now manage products below, and next time log in from the Admin Panel with your email and the password you just set.</div>
       <div class="admin-user" id="adminUserLine"></div>
+      <div class="admin-user" id="arFilesStatus" hidden></div>
       <div class="admin-toolbar">
         <button class="btn-primary" id="adminAddBtn" type="button">+ Add New Product</button>
         <button class="btn-secondary" id="adminDoneBtn" type="button">Done</button>
@@ -496,7 +510,8 @@
       </div>
       <div class="admin-note">
         <b>Your own stock photos:</b> in the add / edit form, tap “Product photo” and pick the real photo from your phone — it uploads and becomes that product's shop photo for every visitor.<br>
-        <b>Your exact product in 3D / AR:</b> a photo on its own is flat, so 3D / AR uses a model of the product type you choose in the form. For your actual product to stand in a customer's room, it first needs a 3D model file (.glb) — made either by scanning the real product from all sides (photogrammetry, about 30–40 photos) or by a 3D artist modelling it from measurements.
+        <b>Your exact product in 3D / AR:</b> a photo on its own is flat, so 3D / AR uses a model of the product type you choose in the form. For your actual product to stand in a customer's room, it first needs a 3D model file (.glb) — made either by scanning the real product from all sides (photogrammetry, about 30–40 photos) or by a 3D artist modelling it from measurements.<br>
+        <b>AR files (automatic):</b> while you are logged in, this panel builds every product's AR files from its 3D model at its real size — a USDZ file so iPhone visitors get Apple's AR Quick Look, and a GLB file Android's AR can use — and saves them to the shop's storage. Progress shows above the product list.
       </div>
       <div class="admin-list" id="adminList"></div>
     </div>
@@ -596,15 +611,19 @@
     <div class="v-fallback" id="arFallback"></div>
     <video id="arVideo" autoplay playsinline muted></video>
     <div class="v-note" id="arNote"></div>
-    <div class="v-hint">Drag to move · Pinch to resize</div>
+    <div class="v-hint" id="arHint">Drag sideways to move it along the floor · Pinch to resize</div>
   </div>
-  <div class="v-bar">
+  <div class="v-bar ar-bar">
     <span class="lbl">Rotate</span>
     <button id="rotLAr" aria-label="Rotate left">⟲</button>
     <button id="rotRAr" aria-label="Rotate right">⟳</button>
-    <span class="lbl" style="margin-left:8px">Size</span>
-    <button id="sizeDownAr" aria-label="Make smaller">−</button>
-    <button id="sizeUpAr" aria-label="Make bigger">+</button>
+    <button id="placeAr" class="ar-place" hidden>Place here</button>
+    <span class="ar-scale">
+      <span class="lbl" style="margin-left:8px">Size</span>
+      <button id="sizeDownAr" aria-label="Make smaller">−</button>
+      <input type="range" id="scaleAr" min="50" max="150" step="1" value="100" aria-label="Fine-tune size" />
+      <button id="sizeUpAr" aria-label="Make bigger">+</button>
+    </span>
   </div>
 </div>
 
@@ -804,6 +823,9 @@ function openSheet(p){
   sg.appendChild(specItem("Category", p.cat));
   if (p.size) sg.appendChild(specItem("Size", p.size, true));
   $("sheetMeta").textContent = p.meta || "";
+  // Warm the AR-file presence cache so the View in AR tap can pick the
+  // right path (Quick Look / Scene Viewer / in-page AR) without waiting.
+  checkModelFile(p, "usdz"); checkModelFile(p, "glb");
   $("scrim").classList.add("open"); $("sheet").classList.add("open");
 }
 function closeSheets(){
@@ -994,6 +1016,7 @@ function showAdminHome(){
   var cur = $("currentLoginEmail"); if (cur) cur.textContent = em || "—";
   renderAdmin();
   loadVisitors();
+  prepareAllArFiles();
 }
 function showAdminLogin(){
   $("adminHome").hidden = true; $("addForm").hidden = true; $("adminLogin").hidden = false;
@@ -1487,15 +1510,18 @@ $("addForm").addEventListener("submit", function(ev){
           if (row && row.id) target.dbId = row.id;
           if (current && current.id === target.id) current = target;
           toast("“" + name + "” updated and saved.");
+          refreshProductArFiles(target);
         } else {
-          PRODUCTS.unshift({
+          var np = {
             id: "db-" + (row && row.id ? row.id : Date.now()), dbId: row && row.id ? row.id : null,
             type: data.type, name: data.name, cat: data.cat,
             colour: data.colour, material: data.material, finish: data.finish, size: data.size,
             img: finalImg, alt: data.name, desc: data.desc, meta: "",
             fabric: base.fabric, wood: base.wood, accent: base.accent
-          });
+          };
+          PRODUCTS.unshift(np);
           toast("“" + name + "” added to the shop and saved.");
+          refreshProductArFiles(np);
         }
         photoFile = null;
         activeCat = "All";
@@ -1626,6 +1652,66 @@ function buildShelf(p){
 }
 var BUILDERS = { sofa: buildSofa, chair: buildChair, dining: buildDining, bed: buildBed, table: buildTable, shelf: buildShelf };
 
+/* ---------------- real-world size (Size field, cm -> metres) ----------------
+   The AR model is scaled so 1 unit = 1 metre and its footprint / height match
+   the product's Size data, so the piece stands in the room at real scale. */
+function parseSizeMetres(str){
+  if (!str) return null;
+  var s = String(str);
+  function labelled(re){ var m = re.exec(s); return m ? parseFloat(m[1]) : null; }
+  var l = labelled(/\bL\s*[:\-]?\s*(\d+(?:\.\d+)?)/i);
+  var w = labelled(/\bW\s*[:\-]?\s*(\d+(?:\.\d+)?)/i);
+  var h = labelled(/\bH\s*[:\-]?\s*(\d+(?:\.\d+)?)/i);
+  if (l == null && w == null && h == null){
+    var nums = s.match(/\d+(?:\.\d+)?/g);
+    if (nums && nums.length >= 3){ l = parseFloat(nums[0]); w = parseFloat(nums[1]); h = parseFloat(nums[2]); }
+    else return null;
+  }
+  function toM(v){ if (v == null || !isFinite(v)) return null; return v > 10 ? v / 100 : v; }
+  l = toM(l); w = toM(w); h = toM(h);
+  if (l == null && w == null && h == null) return null;
+  return { l: l, w: w, h: h };
+}
+function computeRealScale(product, modelSize){
+  var t = parseSizeMetres(product && product.size);
+  if (!t || !modelSize) return 1;
+  var ratios = [];
+  var horizT = [t.l, t.w].filter(function(v){ return v != null; }).sort(function(a, b){ return b - a; });
+  var horizM = [modelSize.x, modelSize.z].sort(function(a, b){ return b - a; });
+  if (horizT.length && horizM[0] > 0) ratios.push(horizT[0] / horizM[0]);
+  if (horizT.length > 1 && horizM[1] > 0) ratios.push(horizT[1] / horizM[1]);
+  if (t.h != null && modelSize.y > 0) ratios.push(t.h / modelSize.y);
+  if (!ratios.length) return 1;
+  ratios.sort(function(a, b){ return a - b; });
+  var mid = ratios[Math.floor(ratios.length / 2)];
+  if (!isFinite(mid) || mid <= 0) return 1;
+  return Math.min(3, Math.max(0.25, mid));
+}
+/* Soft radial contact shadow — the dark pool that sits exactly under the
+   model's base so it reads as resting on the surface, not floating. */
+var _softShadowTex = null;
+function makeSoftShadowTexture(){
+  var c = document.createElement("canvas"); c.width = c.height = 256;
+  var ctx = c.getContext("2d");
+  var g = ctx.createRadialGradient(128, 128, 8, 128, 128, 126);
+  g.addColorStop(0, "rgba(0,0,0,0.55)");
+  g.addColorStop(0.55, "rgba(0,0,0,0.27)");
+  g.addColorStop(1, "rgba(0,0,0,0)");
+  ctx.fillStyle = g; ctx.fillRect(0, 0, 256, 256);
+  return new THREE.CanvasTexture(c);
+}
+function makeContactShadow(w, d){
+  if (!_softShadowTex) _softShadowTex = makeSoftShadowTexture();
+  var m = new THREE.Mesh(
+    new THREE.PlaneGeometry(Math.max(0.3, w), Math.max(0.3, d)),
+    new THREE.MeshBasicMaterial({ map: _softShadowTex, transparent: true, depthWrite: false, opacity: 0.95 })
+  );
+  m.rotation.x = -Math.PI / 2;
+  m.position.y = 0.012;
+  m.renderOrder = 1;
+  return m;
+}
+
 /* ---------------- shared viewer engine ---------------- */
 function makeViewer(stage, product, opts){
   var renderer;
@@ -1668,6 +1754,11 @@ function makeViewer(stage, product, opts){
   var centre = new THREE.Vector3(); bb.getCenter(centre);
   model.position.x -= centre.x; model.position.z -= centre.z; model.position.y -= bb.min.y;
   var wrap = new THREE.Group(); wrap.add(model); scene.add(wrap);
+  if (opts.ar){
+    // Contact shadow ellipse fixed under the base — the piece sits ON the
+    // floor line instead of hovering above it.
+    wrap.add(makeContactShadow(size.x * 1.3 + 0.25, size.z * 1.45 + 0.25));
+  }
   var maxDim = Math.max(size.x, size.y, size.z);
 
   var st = {
@@ -1725,14 +1816,17 @@ function makeViewer(stage, product, opts){
         if (opts.ar) st.scale = Math.min(2.2, Math.max(0.35, st.scale * (d / pinchD)));
         else st.dist = Math.min(maxDim * 5, Math.max(maxDim * 1.1, st.dist * (pinchD / d)));
       }
+      if (opts.ar && opts.onScale) opts.onScale();
       pinchD = d; return;
     }
     var dx = e.clientX - lastX, dy = e.clientY - lastY;
     lastX = e.clientX; lastY = e.clientY;
     if (opts.ar){
+      // Grounding: a drag slides the piece sideways along the floor only.
+      // It never lifts off the floor line and never climbs the wall — the
+      // base and its contact shadow stay planted. Turning is left to the
+      // Rotate buttons so a drag can't swing it off the ground.
       st.offX = Math.min(1.6, Math.max(-1.6, st.offX + dx * 0.004 * maxDim));
-      st.offY = Math.min(0.9, Math.max(-0.5, st.offY - dy * 0.003 * maxDim));
-      st.theta += dx * 0.002;
     } else {
       st.theta -= dx * 0.008;
       st.phi = Math.min(1.45, Math.max(0.35, st.phi - dy * 0.006));
@@ -1745,6 +1839,7 @@ function makeViewer(stage, product, opts){
     e.preventDefault();
     if (opts.ar) st.scale = Math.min(2.2, Math.max(0.35, st.scale * (e.deltaY > 0 ? 0.92 : 1.08)));
     else st.dist = Math.min(maxDim * 5, Math.max(maxDim * 1.1, st.dist * (e.deltaY > 0 ? 1.1 : 0.9)));
+    if (opts.ar && opts.onScale) opts.onScale();
   }, { passive: false });
 
   resize();
@@ -1756,6 +1851,8 @@ function makeViewer(stage, product, opts){
       if (opts.ar) st.scale = Math.min(2.2, Math.max(0.35, st.scale * (dir > 0 ? 1.15 : 0.87)));
       else st.dist = Math.min(maxDim * 5, Math.max(maxDim * 1.1, st.dist * (dir > 0 ? 0.85 : 1.18)));
     },
+    setScale: function(v){ if (opts.ar) st.scale = Math.min(1.5, Math.max(0.5, v)); },
+    getScale: function(){ return st.scale; },
     dispose: function(){
       st.dead = true; cancelAnimationFrame(st.raf);
       window.removeEventListener("resize", resize);
@@ -1792,22 +1889,636 @@ $("rotR3d").addEventListener("click", function(){ if (v3) v3.rotate(1); });
 $("zoomIn3d").addEventListener("click", function(){ if (v3) v3.zoom(1); });
 $("zoomOut3d").addEventListener("click", function(){ if (v3) v3.zoom(-1); });
 
-/* ---------------- AR open/close ---------------- */
-var vAr = null, arStream = null;
+/* ================================================================
+   AR — true surface-anchored placement first (WebXR hit-test),
+   grounded camera-overlay as the automatic fallback.
+   ================================================================ */
+var vAr = null, arStream = null, arMode = "none", xrPlaced = false;
+/* WebXR support is probed once up front so the tap that opens AR can start
+   the immersive session inside the same user gesture. */
+var xrSupported = null;
+if (navigator.xr && typeof navigator.xr.isSessionSupported === "function"){
+  navigator.xr.isSessionSupported("immersive-ar")
+    .then(function(ok){ xrSupported = !!ok; })
+    .catch(function(){ xrSupported = false; });
+} else { xrSupported = false; }
+
+function setArHint(t){ var h = $("arHint"); if (h) h.textContent = t; }
+function syncScaleSlider(){
+  var s = $("scaleAr");
+  if (s && vAr && vAr.getScale) s.value = String(Math.round(Math.min(1.5, Math.max(0.5, vAr.getScale())) * 100));
+}
 function stopCamera(){
   if (arStream){ arStream.getTracks().forEach(function(t){ t.stop(); }); arStream = null; }
   $("arVideo").srcObject = null;
 }
-function openAR(){
-  if (!current) return;
-  closeSheets();
-  $("vArTitle").textContent = current.name + " — AR";
-  $("viewerAr").classList.add("open");
-  $("arNote").style.display = "none";
-  $("arFallback").style.display = "none";
-  var p = current;
+
+/* ---------------- WebXR surface-anchored viewer ----------------
+   A ring reticle follows the hit-test against the real floor / table.
+   Tapping (screen tap = session "select", or the Place here button) anchors
+   the model at that exact real-world pose, at real scale (Size cm -> m,
+   origin at floor level). The anchor is in the room, not on the screen, so
+   the piece stays put while the visitor walks around it. */
+function makeXRViewer(stage, product, hooks){
+  hooks = hooks || {};
+  var renderer;
+  try {
+    renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+  } catch(e){ if (hooks.onFail) hooks.onFail(); return null; }
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setSize(stage.clientWidth || window.innerWidth, stage.clientHeight || window.innerHeight);
+  if (THREE.ACESFilmicToneMapping !== undefined){
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 0.95;
+  }
+  if (renderer.outputColorSpace !== undefined && THREE.SRGBColorSpace !== undefined){
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+  }
+  renderer.xr.enabled = true;
+  renderer.xr.setReferenceSpaceType("local");
+  stage.appendChild(renderer.domElement);
+
+  var scene = new THREE.Scene();
+  var camera = new THREE.PerspectiveCamera(70, 1, 0.01, 100);
+  scene.add(new THREE.HemisphereLight(0xfff4e0, 0x40342a, 1.0));
+  var key = new THREE.DirectionalLight(0xffffff, 1.1);
+  key.position.set(2.5, 4, 2.5); scene.add(key);
+  var fill = new THREE.DirectionalLight(0xdfe8ff, 0.4);
+  fill.position.set(-3, 2, -2); scene.add(fill);
+
+  var model = BUILDERS[product.type](product);
+  var bb = new THREE.Box3().setFromObject(model);
+  var size = new THREE.Vector3(); bb.getSize(size);
+  var centre = new THREE.Vector3(); bb.getCenter(centre);
+  // Model origin at floor level: base exactly on the surface when placed.
+  model.position.x -= centre.x; model.position.z -= centre.z; model.position.y -= bb.min.y;
+
+  var realScale = computeRealScale(product, size);
+  var wrap = new THREE.Group();
+  wrap.add(model);
+  wrap.add(makeContactShadow(size.x * 1.3 + 0.25, size.z * 1.45 + 0.25));
+  wrap.visible = false;
+  scene.add(wrap);
+
+  /* Reticle: ring + centre dot that snap to the detected surface. */
+  var reticle = new THREE.Group();
+  var ring = new THREE.Mesh(
+    new THREE.RingGeometry(0.13, 0.17, 40),
+    new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.95, side: THREE.DoubleSide })
+  );
+  ring.rotation.x = -Math.PI / 2;
+  reticle.add(ring);
+  var dot = new THREE.Mesh(
+    new THREE.CircleGeometry(0.018, 20),
+    new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.95, side: THREE.DoubleSide })
+  );
+  dot.rotation.x = -Math.PI / 2; dot.position.y = 0.001;
+  reticle.add(dot);
+  reticle.visible = false;
+  scene.add(reticle);
+
+  var st = {
+    dead: false, cleaned: false, session: null, hitTestSource: null,
+    placed: false, userScale: 1, theta: 0.5, hasHit: false,
+    placedPos: new THREE.Vector3()
+  };
+  function applyPlacedTransform(){
+    wrap.position.copy(st.placedPos);
+    wrap.rotation.set(0, st.theta, 0);
+    wrap.scale.setScalar(realScale * st.userScale);
+  }
+  function place(){
+    if (st.dead || !reticle.visible) return false;
+    // Anchor at the reticle's real-world surface point. Only the position is
+    // taken from the hit pose — furniture stands upright, so no surface tilt.
+    st.placedPos.copy(reticle.position);
+    applyPlacedTransform();
+    wrap.visible = true;
+    st.placed = true;
+    if (hooks.onPlaced) hooks.onPlaced();
+    return true;
+  }
+  function cleanupRenderer(){
+    if (st.cleaned) return; st.cleaned = true;
+    try { renderer.setAnimationLoop(null); } catch(e){}
+    if (st.hitTestSource){ try { st.hitTestSource.cancel(); } catch(e){} st.hitTestSource = null; }
+    scene.traverse(function(o){
+      if (o.geometry) o.geometry.dispose();
+      if (o.material){ (Array.isArray(o.material) ? o.material : [o.material]).forEach(function(m){ m.dispose(); }); }
+    });
+    try { renderer.dispose(); } catch(e){}
+    if (renderer.domElement.parentNode) renderer.domElement.parentNode.removeChild(renderer.domElement);
+  }
+  var failFired = false;
+  function fail(){
+    if (failFired || st.dead) return; failFired = true;
+    var s = st.session; st.session = null;
+    cleanupRenderer();
+    if (s){ try { var pr = s.end(); if (pr && pr.catch) pr.catch(function(){}); } catch(e){} }
+    if (hooks.onFail) hooks.onFail();
+  }
+  function onResize(){
+    if (!renderer.xr.isPresenting){
+      var w = stage.clientWidth, h = stage.clientHeight;
+      if (w && h) renderer.setSize(w, h);
+    }
+  }
+  window.addEventListener("resize", onResize);
+
+  var api = {
+    isXR: true,
+    rotate: function(dir){ st.theta += dir * 0.45; if (st.placed) applyPlacedTransform(); },
+    zoom: function(dir){
+      st.userScale = Math.min(1.5, Math.max(0.5, st.userScale * (dir > 0 ? 1.15 : 0.87)));
+      if (st.placed) applyPlacedTransform();
+    },
+    setScale: function(v){
+      st.userScale = Math.min(1.5, Math.max(0.5, v));
+      if (st.placed) applyPlacedTransform();
+    },
+    getScale: function(){ return st.userScale; },
+    place: place,
+    dispose: function(){
+      if (st.dead) return; st.dead = true;
+      window.removeEventListener("resize", onResize);
+      var s = st.session; st.session = null;
+      cleanupRenderer();
+      if (s){ try { var pr = s.end(); if (pr && pr.catch) pr.catch(function(){}); } catch(e){} }
+    }
+  };
+
+  var sessionInit = {
+    requiredFeatures: ["hit-test"],
+    optionalFeatures: ["dom-overlay", "local-floor"],
+    domOverlay: { root: document.getElementById("viewerAr") }
+  };
+  var req;
+  try { req = navigator.xr.requestSession("immersive-ar", sessionInit); }
+  catch(e){ window.removeEventListener("resize", onResize); fail(); api._failed = true; return api; }
+  Promise.resolve(req).then(function(session){
+    if (st.dead){ try { session.end(); } catch(e){} return; }
+    st.session = session;
+    session.addEventListener("select", function(){ place(); });
+    session.addEventListener("end", function(){
+      if (!st.dead && hooks.onSessionEnd) hooks.onSessionEnd();
+    });
+    try {
+      var setRes = renderer.xr.setSession(session);
+      if (setRes && setRes.catch) setRes.catch(function(){ fail(); });
+    } catch(e){ fail(); return; }
+    session.requestReferenceSpace("viewer").then(function(viewerSpace){
+      return session.requestHitTestSource({ space: viewerSpace });
+    }).then(function(source){
+      if (st.dead){ try { source.cancel(); } catch(e){} return; }
+      st.hitTestSource = source;
+    }).catch(function(){ fail(); });
+    if (hooks.onReady) hooks.onReady();
+    renderer.setAnimationLoop(function(time, frame){
+      if (st.dead) return;
+      if (frame && st.hitTestSource){
+        var refSpace = renderer.xr.getReferenceSpace();
+        var hits = [];
+        try { hits = frame.getHitTestResults(st.hitTestSource); } catch(e){}
+        var pose = null;
+        if (hits && hits.length && refSpace){
+          try { pose = hits[0].getPose(refSpace); } catch(e){}
+        }
+        if (pose){
+          reticle.visible = true;
+          reticle.position.set(pose.transform.position.x, pose.transform.position.y, pose.transform.position.z);
+          reticle.quaternion.set(pose.transform.orientation.x, pose.transform.orientation.y, pose.transform.orientation.z, pose.transform.orientation.w);
+          if (!st.hasHit){ st.hasHit = true; if (hooks.onHitChange) hooks.onHitChange(true); }
+        } else {
+          reticle.visible = false;
+          if (st.hasHit){ st.hasHit = false; if (hooks.onHitChange) hooks.onHitChange(false); }
+        }
+      }
+      renderer.render(scene, camera);
+    });
+  }).catch(function(){
+    window.removeEventListener("resize", onResize);
+    fail();
+  });
+  return api;
+}
+
+/* ================================================================
+   AR MODEL FILES — real GLB + USDZ files per product, generated from
+   the site's own 3D builders, normalised to floor level and scaled to
+   real size in metres (same cm -> m logic as the WebXR path), stored in
+   the existing public 'product-photos' bucket under models/<id>.glb and
+   models/<id>.usdz. iPhone's real AR (AR Quick Look) needs the USDZ;
+   Android's Scene Viewer fallback uses the GLB. Presence is checked by
+   requesting the public URL — no database change.
+   ================================================================ */
+var IS_IOS = /iP(hone|ad|od)/.test(navigator.userAgent || "") ||
+  (navigator.platform === "MacIntel" && (navigator.maxTouchPoints || 0) > 1);
+var IS_ANDROID = /Android/i.test(navigator.userAgent || "");
+var arFileCache = {}, arFileInflight = {}, arPreparedIds = {};
+function modelFileUrl(p, ext){
+  return SB_URL + "/storage/v1/object/public/product-photos/models/" + encodeURIComponent(p.id) + "." + ext;
+}
+function checkModelFile(p, ext){
+  var key = p.id + "." + ext;
+  if (Object.prototype.hasOwnProperty.call(arFileCache, key)) return Promise.resolve(arFileCache[key]);
+  if (arFileInflight[key]) return arFileInflight[key];
+  var pr = fetch(modelFileUrl(p, ext), { method: "HEAD" }).then(function(r){
+    var ok = !!r.ok; arFileCache[key] = ok; return ok;
+  }, function(){ return false; /* network error: not cached, a later tap retries */ });
+  arFileInflight[key] = pr;
+  pr.then(function(){ if (arFileInflight[key] === pr) delete arFileInflight[key]; });
+  return pr;
+}
+function uploadModelFile(p, ext, blob){
+  var path = "models/" + encodeURIComponent(p.id) + "." + ext;
+  return fetch(SB_URL + "/storage/v1/object/product-photos/" + path, {
+    method: "POST",
+    headers: {
+      "apikey": SB_KEY, "Authorization": "Bearer " + sbToken(),
+      "Content-Type": ext === "glb" ? "model/gltf-binary" : "model/vnd.usdz+zip",
+      "x-upsert": "true"
+    },
+    body: blob
+  }).then(function(r){
+    if (!r.ok) throw new Error("model upload " + r.status);
+    arFileCache[p.id + "." + ext] = true;
+    return true;
+  });
+}
+/* Build the product's model exactly as the AR viewers do: same builder,
+   origin normalised to floor level, scaled to real-world metres. */
+function buildExportRoot(product){
+  var model = BUILDERS[product.type](product);
+  var bb = new THREE.Box3().setFromObject(model);
+  var size = new THREE.Vector3(); bb.getSize(size);
+  var centre = new THREE.Vector3(); bb.getCenter(centre);
+  model.position.x -= centre.x; model.position.z -= centre.z; model.position.y -= bb.min.y;
+  var wrap = new THREE.Group();
+  wrap.add(model);
+  wrap.scale.setScalar(computeRealScale(product, size));
+  wrap.updateMatrixWorld(true);
+  return wrap;
+}
+/* Flatten a built model into plain geometry + material data with world
+   transforms baked in, ready for either file exporter. */
+function collectMeshData(root){
+  root.updateMatrixWorld(true);
+  var out = [];
+  var v = new THREE.Vector3(), nv = new THREE.Vector3();
+  root.traverse(function(o){
+    if (!o.isMesh || !o.geometry || !o.material || !o.material.isMeshStandardMaterial) return;
+    var geo = o.geometry;
+    if (!geo.attributes.position) return;
+    if (!geo.attributes.normal) geo.computeVertexNormals();
+    var pos = geo.attributes.position, nor = geo.attributes.normal;
+    var count = pos.count;
+    var positions = new Float32Array(count * 3);
+    var normals = new Float32Array(count * 3);
+    var nm = new THREE.Matrix3().getNormalMatrix(o.matrixWorld);
+    for (var i = 0; i < count; i++){
+      v.fromBufferAttribute(pos, i).applyMatrix4(o.matrixWorld);
+      positions[i * 3] = v.x; positions[i * 3 + 1] = v.y; positions[i * 3 + 2] = v.z;
+      nv.fromBufferAttribute(nor, i).applyMatrix3(nm).normalize();
+      normals[i * 3] = nv.x; normals[i * 3 + 1] = nv.y; normals[i * 3 + 2] = nv.z;
+    }
+    var indices, j;
+    if (geo.index){
+      var src = geo.index.array;
+      indices = new Uint32Array(src.length);
+      for (j = 0; j < src.length; j++) indices[j] = src[j];
+    } else {
+      indices = new Uint32Array(count);
+      for (j = 0; j < count; j++) indices[j] = j;
+    }
+    var m = o.material;
+    var key = (m.color ? m.color.getHex() : 0) + "|" + (m.roughness || 0) + "|" + (m.metalness || 0) + "|" + (m.opacity == null ? 1 : m.opacity);
+    out.push({ positions: positions, normals: normals, indices: indices, material: m, key: key });
+  });
+  return out;
+}
+/* ---------------- GLB (binary glTF) exporter ---------------- */
+function exportGLBBlob(meshData){
+  var json = {
+    asset: { version: "2.0", generator: "SST Furniture" },
+    scene: 0, scenes: [{ nodes: [] }],
+    nodes: [], meshes: [], materials: [], accessors: [], bufferViews: [], buffers: []
+  };
+  var binChunks = [], binLen = 0;
+  function addView(bytes, target){
+    while (binLen % 4){ binChunks.push(new Uint8Array(1)); binLen++; }
+    var off = binLen;
+    binChunks.push(bytes); binLen += bytes.length;
+    json.bufferViews.push({ buffer: 0, byteOffset: off, byteLength: bytes.length, target: target });
+    return json.bufferViews.length - 1;
+  }
+  var matIndex = {}, matCount = 0;
+  function materialFor(md){
+    if (matIndex[md.key] !== undefined) return matIndex[md.key];
+    var c = md.material.color || { r: 1, g: 1, b: 1 };
+    var idx = matCount++;
+    matIndex[md.key] = idx;
+    json.materials.push({
+      name: "mat" + idx,
+      pbrMetallicRoughness: {
+        baseColorFactor: [c.r, c.g, c.b, md.material.opacity == null ? 1 : md.material.opacity],
+        metallicFactor: md.material.metalness || 0,
+        roughnessFactor: md.material.roughness == null ? 1 : md.material.roughness
+      }
+    });
+    return idx;
+  }
+  meshData.forEach(function(md, i){
+    var posBytes = new Uint8Array(md.positions.buffer, md.positions.byteOffset, md.positions.byteLength);
+    var norBytes = new Uint8Array(md.normals.buffer, md.normals.byteOffset, md.normals.byteLength);
+    var idxBytes = new Uint8Array(md.indices.buffer, md.indices.byteOffset, md.indices.byteLength);
+    var min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
+    for (var k = 0; k < md.positions.length; k += 3){
+      for (var a = 0; a < 3; a++){
+        var val = md.positions[k + a];
+        if (val < min[a]) min[a] = val;
+        if (val > max[a]) max[a] = val;
+      }
+    }
+    var posAcc = json.accessors.push({ bufferView: addView(posBytes, 34962), componentType: 5126, count: md.positions.length / 3, type: "VEC3", min: min, max: max }) - 1;
+    var norAcc = json.accessors.push({ bufferView: addView(norBytes, 34962), componentType: 5126, count: md.normals.length / 3, type: "VEC3" }) - 1;
+    var idxAcc = json.accessors.push({ bufferView: addView(idxBytes, 34963), componentType: 5125, count: md.indices.length, type: "SCALAR" }) - 1;
+    json.meshes.push({ name: "mesh" + i, primitives: [{ attributes: { POSITION: posAcc, NORMAL: norAcc }, indices: idxAcc, material: materialFor(md) }] });
+    json.nodes.push({ mesh: i, name: "mesh" + i });
+    json.scenes[0].nodes.push(i);
+  });
+  json.buffers.push({ byteLength: binLen });
+  var jsonBytes = new TextEncoder().encode(JSON.stringify(json));
+  var jsonPad = (4 - (jsonBytes.length % 4)) % 4;
+  var binPad = (4 - (binLen % 4)) % 4;
+  var total = 12 + 8 + jsonBytes.length + jsonPad + 8 + binLen + binPad;
+  var buf = new ArrayBuffer(total);
+  var dv = new DataView(buf);
+  var u8 = new Uint8Array(buf);
+  dv.setUint32(0, 0x46546C67, true); dv.setUint32(4, 2, true); dv.setUint32(8, total, true);
+  dv.setUint32(12, jsonBytes.length + jsonPad, true); dv.setUint32(16, 0x4E4F534A, true);
+  u8.set(jsonBytes, 20);
+  for (var s = 0; s < jsonPad; s++) u8[20 + jsonBytes.length + s] = 0x20;
+  var binOff = 20 + jsonBytes.length + jsonPad;
+  dv.setUint32(binOff, binLen + binPad, true); dv.setUint32(binOff + 4, 0x004E4942, true);
+  var pos = binOff + 8;
+  binChunks.forEach(function(c){ u8.set(c, pos); pos += c.length; });
+  return new Blob([buf], { type: "model/gltf-binary" });
+}
+/* ---------------- USDZ exporter (USDA text in a stored zip) ---------------- */
+var CRC_TABLE = null;
+function crc32(bytes){
+  if (!CRC_TABLE){
+    CRC_TABLE = new Int32Array(256);
+    for (var n = 0; n < 256; n++){
+      var c = n;
+      for (var k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+      CRC_TABLE[n] = c;
+    }
+  }
+  var crc = -1;
+  for (var i = 0; i < bytes.length; i++) crc = (crc >>> 8) ^ CRC_TABLE[(crc ^ bytes[i]) & 0xFF];
+  return (crc ^ -1) >>> 0;
+}
+/* USDZ package rules: entries stored uncompressed and each file's data
+   starts at a 64-byte-aligned offset (padding rides in the local header's
+   extra field). The USD file is the first (here only) entry. */
+function buildStoredZip(files){
+  var enc = new TextEncoder();
+  var chunks = [], centrals = [], offset = 0;
+  files.forEach(function(f){
+    var nameBytes = enc.encode(f.name);
+    var crc = crc32(f.data);
+    var extraLen = 0;
+    var rem = (offset + 30 + nameBytes.length) % 64;
+    if (rem !== 0){ extraLen = 64 - rem; if (extraLen < 4) extraLen += 64; }
+    var extra = new Uint8Array(extraLen);
+    if (extraLen >= 4){
+      var ev = new DataView(extra.buffer);
+      ev.setUint16(0, 0xFFFF, true); ev.setUint16(2, extraLen - 4, true);
+    }
+    var lh = new DataView(new ArrayBuffer(30));
+    lh.setUint32(0, 0x04034b50, true);
+    lh.setUint16(4, 20, true);
+    lh.setUint16(8, 0, true);
+    lh.setUint16(12, 0x5821, true); /* DOS date 2024-01-01 */
+    lh.setUint32(14, crc, true);
+    lh.setUint32(18, f.data.length, true);
+    lh.setUint32(22, f.data.length, true);
+    lh.setUint16(26, nameBytes.length, true);
+    lh.setUint16(28, extraLen, true);
+    chunks.push(new Uint8Array(lh.buffer), nameBytes, extra, f.data);
+    var ch = new DataView(new ArrayBuffer(46));
+    ch.setUint32(0, 0x02014b50, true);
+    ch.setUint16(4, 20, true); ch.setUint16(6, 20, true);
+    ch.setUint16(10, 0, true);
+    ch.setUint16(14, 0x5821, true);
+    ch.setUint32(16, crc, true);
+    ch.setUint32(20, f.data.length, true);
+    ch.setUint32(24, f.data.length, true);
+    ch.setUint16(28, nameBytes.length, true);
+    ch.setUint32(42, offset, true);
+    centrals.push(new Uint8Array(ch.buffer), nameBytes);
+    offset += 30 + nameBytes.length + extraLen + f.data.length;
+  });
+  var cdStart = offset, cdSize = 0;
+  centrals.forEach(function(c){ cdSize += c.length; });
+  var eocd = new DataView(new ArrayBuffer(22));
+  eocd.setUint32(0, 0x06054b50, true);
+  eocd.setUint16(8, files.length, true);
+  eocd.setUint16(10, files.length, true);
+  eocd.setUint32(12, cdSize, true);
+  eocd.setUint32(16, cdStart, true);
+  var all = chunks.concat(centrals);
+  all.push(new Uint8Array(eocd.buffer));
+  var total = 0; all.forEach(function(c){ total += c.length; });
+  var out = new Uint8Array(total), pos = 0;
+  all.forEach(function(c){ out.set(c, pos); pos += c.length; });
+  return out;
+}
+function usdNum(n){
+  if (!isFinite(n)) return "0";
+  var s = String(Math.round(n * 100000) / 100000);
+  if (s.indexOf(".") === -1 && s.indexOf("e") === -1) s += ".0";
+  return s;
+}
+function usdVec3Array(arr){
+  var parts = [];
+  for (var i = 0; i < arr.length; i += 3){
+    parts.push("(" + usdNum(arr[i]) + ", " + usdNum(arr[i + 1]) + ", " + usdNum(arr[i + 2]) + ")");
+  }
+  return parts.join(", ");
+}
+function exportUSDZBlob(meshData){
+  var matIndex = {}, matList = [];
+  meshData.forEach(function(md){
+    if (matIndex[md.key] === undefined){ matIndex[md.key] = matList.length; matList.push(md.material); }
+  });
+  var L = [];
+  L.push("#usda 1.0");
+  L.push("(");
+  L.push('    defaultPrim = "Root"');
+  L.push("    metersPerUnit = 1");
+  L.push('    upAxis = "Y"');
+  L.push(")");
+  L.push("");
+  L.push('def Xform "Root"');
+  L.push("{");
+  meshData.forEach(function(md, i){
+    var min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
+    for (var k = 0; k < md.positions.length; k += 3){
+      for (var a = 0; a < 3; a++){
+        var val = md.positions[k + a];
+        if (val < min[a]) min[a] = val;
+        if (val > max[a]) max[a] = val;
+      }
+    }
+    var counts = [];
+    for (var t = 0; t < md.indices.length / 3; t++) counts.push(3);
+    L.push('    def Mesh "mesh' + i + '"');
+    L.push("    {");
+    L.push("        float3[] extent = [(" + usdNum(min[0]) + ", " + usdNum(min[1]) + ", " + usdNum(min[2]) + "), (" + usdNum(max[0]) + ", " + usdNum(max[1]) + ", " + usdNum(max[2]) + ")]");
+    L.push("        int[] faceVertexCounts = [" + counts.join(", ") + "]");
+    L.push("        int[] faceVertexIndices = [" + Array.prototype.join.call(md.indices, ", ") + "]");
+    L.push("        float3[] points = [" + usdVec3Array(md.positions) + "]");
+    L.push("        float3[] primvars:normals = [" + usdVec3Array(md.normals) + "] (");
+    L.push('            interpolation = "vertex"');
+    L.push("        )");
+    L.push('        uniform token subdivisionScheme = "none"');
+    L.push("        rel material:binding = </Root/Materials/mat" + matIndex[md.key] + ">");
+    L.push("    }");
+  });
+  L.push('    def Scope "Materials"');
+  L.push("    {");
+  matList.forEach(function(m, mi){
+    var c = m.color || { r: 1, g: 1, b: 1 };
+    L.push('        def Material "mat' + mi + '"');
+    L.push("        {");
+    L.push("            token outputs:surface.connect = </Root/Materials/mat" + mi + "/surface.outputs:surface>");
+    L.push('            def Shader "surface"');
+    L.push("            {");
+    L.push('                uniform token info:id = "UsdPreviewSurface"');
+    L.push("                color3f inputs:diffuseColor = (" + usdNum(c.r) + ", " + usdNum(c.g) + ", " + usdNum(c.b) + ")");
+    L.push("                float inputs:metallic = " + usdNum(m.metalness || 0));
+    L.push("                float inputs:roughness = " + usdNum(m.roughness == null ? 1 : m.roughness));
+    if (m.opacity != null && m.opacity < 1) L.push("                float inputs:opacity = " + usdNum(m.opacity));
+    L.push("                token outputs:surface");
+    L.push("            }");
+    L.push("        }");
+  });
+  L.push("    }");
+  L.push("}");
+  var usda = L.join("\n");
+  var bytes = buildStoredZip([{ name: "model.usda", data: new TextEncoder().encode(usda) }]);
+  return new Blob([bytes], { type: "model/vnd.usdz+zip" });
+}
+/* ---------------- generation + upload orchestration ---------------- */
+function tryUploadModel(p, ext, data){
+  return Promise.resolve().then(function(){
+    var blob = ext === "glb" ? exportGLBBlob(data) : exportUSDZBlob(data);
+    return uploadModelFile(p, ext, blob);
+  }).then(function(){ return true; }).catch(function(){ return false; });
+}
+function ensureProductArFiles(p, force){
+  function need(ext){
+    if (force) return Promise.resolve(true);
+    return checkModelFile(p, ext).then(function(has){ return !has; });
+  }
+  return Promise.all([need("glb"), need("usdz")]).then(function(n){
+    if (!n[0] && !n[1]){ arPreparedIds[p.id] = 1; return true; }
+    var data;
+    try { data = collectMeshData(buildExportRoot(p)); } catch(e){ return false; }
+    if (!data.length) return false;
+    var jobs = [];
+    if (n[0]) jobs.push(tryUploadModel(p, "glb", data));
+    if (n[1]) jobs.push(tryUploadModel(p, "usdz", data));
+    return Promise.all(jobs).then(function(res){
+      var ok = res.every(function(x){ return x; });
+      if (ok) arPreparedIds[p.id] = 1;
+      return ok;
+    });
+  }).catch(function(){ return false; });
+}
+/* Automatic preparation: runs when the admin is logged in and quietly
+   builds + uploads any missing AR files, product by product. */
+function prepareAllArFiles(){
+  if (!sbToken()) return;
+  var pending = PRODUCTS.filter(function(p){ return !arPreparedIds[p.id]; });
+  if (!pending.length) return;
+  var st = $("arFilesStatus");
+  var total = pending.length, doneN = 0, okN = 0;
+  function upd(){
+    if (!st) return;
+    st.hidden = false;
+    st.textContent = doneN < total
+      ? "Preparing AR files for iPhone & Android AR… " + doneN + " of " + total + " products done."
+      : (okN === total
+          ? "AR files ready — every product can open in real AR on iPhone (Quick Look) and Android."
+          : "AR files ready for " + okN + " of " + total + " products — the rest will retry next time you open this panel.");
+  }
+  upd();
+  var chain = Promise.resolve();
+  pending.forEach(function(p){
+    chain = chain.then(function(){
+      return ensureProductArFiles(p, false).then(function(ok){ doneN++; if (ok) okN++; upd(); });
+    });
+  });
+}
+function refreshProductArFiles(p){
+  var st = $("arFilesStatus");
+  if (st){ st.hidden = false; st.textContent = "Updating AR files for “" + p.name + "”…"; }
+  ensureProductArFiles(p, true).then(function(ok){
+    if (st) st.textContent = ok
+      ? "AR files ready for “" + p.name + "” — iPhone and Android AR are up to date."
+      : "AR files for “" + p.name + "” could not be updated — they will be prepared again next time you open the admin panel.";
+  });
+}
+/* ---------------- device-specific real-AR launchers ---------------- */
+/* iPhone / iPad: AR Quick Look — an anchor with rel="ar" pointing at the
+   product's USDZ file. Safari opens it as real surface AR at real scale. */
+function openQuickLook(p){
+  var a = document.createElement("a");
+  a.setAttribute("rel", "ar");
+  a.setAttribute("href", modelFileUrl(p, "usdz"));
+  var img = document.createElement("img");
+  img.src = p.img; img.alt = "";
+  a.appendChild(img);
+  a.style.cssText = "position:absolute;left:-9999px;top:0;width:1px;height:1px;opacity:0;overflow:hidden";
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(function(){ if (a.parentNode) a.parentNode.removeChild(a); }, 1500);
+}
+/* Android without WebXR: Google Scene Viewer with the product's GLB. */
+function openSceneViewer(p){
+  var file = modelFileUrl(p, "glb");
+  var intent = "intent://arvr.google.com/scene-viewer/1.0?file=" + encodeURIComponent(file) +
+    "&mode=ar_preferred&title=" + encodeURIComponent(p.name) +
+    "#Intent;scheme=https;package=com.google.ar.core;action=android.intent.action.VIEW;" +
+    "S.browser_fallback_url=" + encodeURIComponent("https://lucky-003.github.io/sst-furniture/") + ";end;";
+  window.location.href = intent;
+}
+function androidSceneViewerOrOverlay(p){
+  if (IS_ANDROID){
+    if (arFileCache[p.id + ".glb"]){ closeAR(); openSceneViewer(p); return; }
+    checkModelFile(p, "glb").then(function(has){
+      if (!$("viewerAr").classList.contains("open")) return;
+      if (has){ closeAR(); openSceneViewer(p); }
+      else startOverlayAR(p);
+    });
+    return;
+  }
+  startOverlayAR(p);
+}
+
+/* ---------------- AR paths ---------------- */
+function startOverlayAR(p){
+  arMode = "overlay";
+  $("viewerAr").classList.remove("xr-active");
+  $("placeAr").hidden = true;
+  setArHint("Drag sideways to move it along the floor · Pinch or use Size to resize");
   requestAnimationFrame(function(){
-    if ($("viewerAr").classList.contains("open") && !vAr) vAr = makeViewer($("stageAr"), p, { ar: true });
+    if ($("viewerAr").classList.contains("open") && !vAr){
+      vAr = makeViewer($("stageAr"), p, { ar: true, onScale: syncScaleSlider });
+    }
   });
   if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia){
     navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false })
@@ -1821,8 +2532,87 @@ function openAR(){
     showArFallback();
   }
 }
+function startXRAR(p){
+  arMode = "xr";
+  xrPlaced = false;
+  $("viewerAr").classList.add("xr-active");
+  $("arFallback").style.display = "none";
+  $("placeAr").hidden = false;
+  setArHint("Move your phone slowly to find the floor, then tap to place");
+  var viewer = null;
+  var fellBack = false;
+  function fallbackOnce(){
+    // WebXR could not start — fall back to the overlay automatically,
+    // no error shown to the visitor. Runs at most once per open.
+    if (fellBack) return; fellBack = true;
+    if (vAr === viewer) vAr = null;
+    xrPlaced = false;
+    startOverlayAR(p);
+  }
+  viewer = makeXRViewer($("stageAr"), p, {
+    onHitChange: function(hasHit){
+      if (arMode !== "xr" || vAr !== viewer) return;
+      if (xrPlaced){
+        setArHint(hasHit ? "Tap to move it here · Turn and Size adjust it" : "Placed — walk around it · Point at a new spot and tap to move it");
+      } else {
+        setArHint(hasHit ? "Surface found — tap the screen or “Place here”" : "Move your phone slowly to find the floor, then tap to place");
+      }
+    },
+    onPlaced: function(){
+      if (arMode !== "xr" || vAr !== viewer) return;
+      xrPlaced = true;
+      setArHint("Placed — walk around it · Tap a new spot to move it");
+    },
+    onFail: function(){
+      if (arMode !== "xr") return;
+      fallbackOnce();
+    },
+    onSessionEnd: function(){ closeAR(); }
+  });
+  if (!viewer || viewer._failed){ fallbackOnce(); return; }
+  vAr = viewer;
+}
+function openAR(){
+  if (!current) return;
+  var p = current;
+  if (IS_IOS){
+    // iPhone / iPad has no WebXR in any browser — real AR there is Apple's
+    // AR Quick Look, which needs the product's USDZ file. Its presence was
+    // pre-checked when the product sheet opened.
+    if (arFileCache[p.id + ".usdz"]){ openQuickLook(p); return; }
+    checkModelFile(p, "usdz").then(function(has){
+      if (has) openQuickLook(p);
+      else startArViewer(p);
+    });
+    return;
+  }
+  startArViewer(p);
+}
+function startArViewer(p){
+  closeSheets();
+  $("vArTitle").textContent = p.name + " — AR";
+  $("viewerAr").classList.add("open");
+  $("arNote").style.display = "none";
+  $("arFallback").style.display = "none";
+  $("scaleAr").value = "100";
+  if (xrSupported === true){
+    startXRAR(p);
+  } else if (xrSupported === null && navigator.xr && typeof navigator.xr.isSessionSupported === "function"){
+    navigator.xr.isSessionSupported("immersive-ar").then(function(ok){
+      xrSupported = !!ok;
+      if (!$("viewerAr").classList.contains("open") || vAr) return;
+      if (ok) startXRAR(p); else androidSceneViewerOrOverlay(p);
+    }).catch(function(){
+      xrSupported = false;
+      if ($("viewerAr").classList.contains("open") && !vAr) androidSceneViewerOrOverlay(p);
+    });
+  } else {
+    androidSceneViewerOrOverlay(p);
+  }
+}
 function showArFallback(){
   if (!$("viewerAr").classList.contains("open")) return;
+  if (arMode === "xr") return;
   $("arFallback").style.display = "block";
   var n = $("arNote");
   n.textContent = "Camera isn't available here, so this is a preview. On your phone, allow camera access to place it in your real room.";
@@ -1830,15 +2620,25 @@ function showArFallback(){
 }
 function closeAR(){
   $("viewerAr").classList.remove("open");
+  $("viewerAr").classList.remove("xr-active");
+  arMode = "none"; xrPlaced = false;
   stopCamera();
-  if (vAr){ vAr.dispose(); vAr = null; }
+  if (vAr){ var v = vAr; vAr = null; v.dispose(); }
 }
 $("btnAr").addEventListener("click", openAR);
 $("vArClose").addEventListener("click", closeAR);
 $("rotLAr").addEventListener("click", function(){ if (vAr) vAr.rotate(-1); });
 $("rotRAr").addEventListener("click", function(){ if (vAr) vAr.rotate(1); });
-$("sizeUpAr").addEventListener("click", function(){ if (vAr) vAr.zoom(1); });
-$("sizeDownAr").addEventListener("click", function(){ if (vAr) vAr.zoom(-1); });
+$("sizeUpAr").addEventListener("click", function(){ if (vAr){ vAr.zoom(1); syncScaleSlider(); } });
+$("sizeDownAr").addEventListener("click", function(){ if (vAr){ vAr.zoom(-1); syncScaleSlider(); } });
+$("placeAr").addEventListener("click", function(){
+  if (vAr && vAr.place){
+    if (!vAr.place()) setArHint("No surface found yet — move your phone slowly over the floor");
+  }
+});
+$("scaleAr").addEventListener("input", function(){
+  if (vAr && vAr.setScale) vAr.setScale(parseInt(this.value, 10) / 100);
+});
 
 window.addEventListener("error", function(e){
   if (e && e.message) toast("Something went wrong: " + e.message, 3200);
